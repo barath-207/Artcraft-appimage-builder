@@ -1,3 +1,4 @@
+
 name: Build ArtCraft AppImages
 
 on:
@@ -29,12 +30,15 @@ jobs:
     name: Build ${{ matrix.app }}
     runs-on: ubuntu-22.04
     timeout-minutes: 180
+
     strategy:
       fail-fast: false
       matrix:
         app: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.app != 'all' && inputs.app != '' && format('["{0}"]', inputs.app) || '["pdfcraft","photocraft","gridcraft","filmcraft","wordcraft"]') }}
+
     permissions:
       contents: read
+
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -46,39 +50,67 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           case "${{ matrix.app }}" in
             pdfcraft)   repo=storytold/pdfcraft;   display=PdfCraft;   slug=pdfcraft ;;
             photocraft) repo=storytold/photocraft; display=PhotoCraft; slug=photocraft ;;
             gridcraft)  repo=storytold/gridcraft;  display=GridCraft;  slug=gridcraft ;;
             filmcraft)  repo=storytold/filmcraft;  display=FilmCraft;  slug=filmcraft ;;
             wordcraft)  repo=storytold/wordcraft;  display=WordCraft;  slug=wordcraft ;;
+            *) echo "Unknown application" >&2; exit 1 ;;
           esac
+
           {
             echo "repo=$repo"
             echo "display=$display"
             echo "slug=$slug"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Resolve upstream main and compare with rolling release
+      - name: Resolve upstream and compare with latest release
         id: upstream
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_REPO: ${{ steps.app.outputs.repo }}
           APP: ${{ matrix.app }}
           FORCE: ${{ inputs.force }}
+          REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
+
+          # Date-based release tag (India time).
+          current_tag="v$(TZ=Asia/Kolkata date +'%Y.%m.%d')"
+
+          # Resolve the upstream main branch.
           sha="$(git ls-remote "https://github.com/${SOURCE_REPO}.git" refs/heads/main | awk '{print $1}')"
+
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || {
             echo "Could not resolve ${SOURCE_REPO} main" >&2
             exit 1
           }
 
+          # Prefer today's release if it already exists.
+          # Otherwise use the most recent previous release.
+          if gh release view "$current_tag" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            baseline_tag="$current_tag"
+          else
+            baseline_tag="$(gh release list \
+              --repo "$REPOSITORY" \
+              --limit 100 \
+              --json tagName \
+              --jq --arg current "$current_tag" \
+              '[.[] | select(.tagName != $current) | .tagName][0] // empty')"
+          fi
+
           old_sha=""
-          if gh release view artcraft-appimages --repo "$GITHUB_REPOSITORY" --json body \
-              --jq '.body' > /tmp/current-release-body.txt 2>/dev/null; then
-            old_sha="$(sed -n "s/^${APP}=\([0-9a-f]\{40\}\)$/\1/p" /tmp/current-release-body.txt | head -n1)"
+
+          if [[ -n "$baseline_tag" ]]; then
+            if gh release view "$baseline_tag" --repo "$REPOSITORY" --json body \
+                --jq '.body' > /tmp/current-release-body.txt 2>/dev/null; then
+
+              old_sha="$(sed -n "s/^${APP}=\([0-9a-f]\{40\}\)$/\1/p" \
+                /tmp/current-release-body.txt | head -n1)"
+            fi
           fi
 
           if [[ "${FORCE:-false}" == true || "$sha" != "$old_sha" ]]; then
@@ -91,8 +123,14 @@ jobs:
             echo "sha=$sha"
             echo "build=$build"
             echo "short_sha=${sha:0:12}"
+            echo "release_tag=$current_tag"
           } >> "$GITHUB_OUTPUT"
-          echo "${APP}: upstream=$sha previous=${old_sha:-none} build=$build"
+
+          echo "Application: $APP"
+          echo "Upstream: $sha"
+          echo "Previous: ${old_sha:-none}"
+          echo "Baseline release: ${baseline_tag:-none}"
+          echo "Build required: $build"
 
       - name: Checkout upstream source
         if: steps.upstream.outputs.build == 'true'
@@ -125,6 +163,7 @@ jobs:
         if: steps.upstream.outputs.build == 'true'
         run: |
           sudo apt-get update
+
           sudo apt-get install -y --no-install-recommends \
             build-essential clang curl git pkg-config cmake \
             libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev \
@@ -156,18 +195,33 @@ jobs:
           set -euo pipefail
 
           case "$APP" in
-            pdfcraft)   export PDFCRAFT_BUILD_SHA="$UPSTREAM_SHA" ;;
-            photocraft) export PHOTOCRAFT_BUILD_SHA="$UPSTREAM_SHA"; unset CRAFT_I18N_DIR CRAFT_I18N_REQUIRED ;;
-            gridcraft)  export GRIDCRAFT_BUILD_SHA="$UPSTREAM_SHA"; unset CRAFT_I18N_DIR CRAFT_I18N_REQUIRED ;;
-            filmcraft)  export FILMCRAFT_BUILD_SHA="$UPSTREAM_SHA"; unset CRAFT_I18N_DIR CRAFT_I18N_REQUIRED ;;
-            wordcraft)  export WORDCRAFT_BUILD_SHA="$UPSTREAM_SHA"; unset CRAFT_I18N_DIR CRAFT_I18N_REQUIRED ;;
+            pdfcraft)
+              export PDFCRAFT_BUILD_SHA="$UPSTREAM_SHA"
+              ;;
+            photocraft)
+              export PHOTOCRAFT_BUILD_SHA="$UPSTREAM_SHA"
+              unset CRAFT_I18N_DIR CRAFT_I18N_REQUIRED
+              ;;
+            gridcraft)
+              export GRIDCRAFT_BUILD_SHA="$UPSTREAM_SHA"
+              unset CRAFT_I18N_DIR CRAFT_I18N_REQUIRED
+              ;;
+            filmcraft)
+              export FILMCRAFT_BUILD_SHA="$UPSTREAM_SHA"
+              unset CRAFT_I18N_DIR CRAFT_I18N_REQUIRED
+              ;;
+            wordcraft)
+              export WORDCRAFT_BUILD_SHA="$UPSTREAM_SHA"
+              unset CRAFT_I18N_DIR CRAFT_I18N_REQUIRED
+              ;;
           esac
 
-          # Match the upstream Linux packaging workflow; build only the AppImage format.
+          # Build only the AppImage format.
           packaging/linux/package.sh --formats appimage
 
           shopt -s nullglob
           images=(dist/release/*-linux-x86_64.AppImage)
+
           if [[ ${#images[@]} -ne 1 ]]; then
             echo "Expected one x86_64 AppImage, found ${#images[@]}" >&2
             printf '%s\n' "${images[@]}"
@@ -175,17 +229,21 @@ jobs:
           fi
 
           case "$APP" in
-            pdfcraft) name=PdfCraft ;;
+            pdfcraft)   name=PdfCraft ;;
             photocraft) name=PhotoCraft ;;
-            gridcraft) name=GridCraft ;;
-            filmcraft) name=FilmCraft ;;
-            wordcraft) name=WordCraft ;;
+            gridcraft)  name=GridCraft ;;
+            filmcraft)  name=FilmCraft ;;
+            wordcraft)  name=WordCraft ;;
           esac
 
           mkdir -p ../out
-          install -m 0755 "${images[0]}" "../out/${name}-latest-x86_64.AppImage"
+
+          install -m 0755 "${images[0]}" \
+            "../out/${name}-latest-x86_64.AppImage"
+
           printf '%s\n' "$UPSTREAM_SHA" > "../out/${APP}.commit"
           printf '%s\n' built > "../out/${APP}.status"
+
           file "../out/${name}-latest-x86_64.AppImage"
 
       - name: Record unchanged app
@@ -193,7 +251,7 @@ jobs:
         run: |
           mkdir -p out
           printf '%s\n' unchanged > "out/${{ matrix.app }}.status"
-          echo "${{ matrix.app }} is unchanged; keeping its existing release asset."
+          echo "${{ matrix.app }} is unchanged."
 
       - name: Upload app result for consolidated publishing
         uses: actions/upload-artifact@v4
@@ -204,22 +262,24 @@ jobs:
           retention-days: 2
 
   publish:
-    name: Update the single rolling release
+    name: Publish versioned ArtCraft release
     needs: build
     if: always() && needs.build.result == 'success'
     runs-on: ubuntu-22.04
     timeout-minutes: 15
+
     permissions:
       contents: write
+
     steps:
-      - name: Download outputs from changed apps
+      - name: Download outputs from all apps
         uses: actions/download-artifact@v4
         with:
           pattern: artcraft-*
           path: incoming
           merge-multiple: true
 
-      - name: Publish only changed AppImages
+      - name: Assemble and publish complete release
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -227,32 +287,116 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
+
+          # Generate the version using India local date.
+          RELEASE_TAG="v$(TZ=Asia/Kolkata date +'%Y.%m.%d')"
+
+          mkdir -p release previous
+
           images=(incoming/*-latest-x86_64.AppImage)
           commits=(incoming/*.commit)
 
+          # No new builds means no new release is required.
           if [[ ${#images[@]} -eq 0 ]]; then
-            echo "No upstream changes. The five existing AppImages remain untouched."
+            echo "No upstream changes. Existing release remains untouched."
             exit 0
           fi
 
-          # Start with the previous commit map, then update only apps built in this run.
-          body=""
-          if gh release view artcraft-appimages --repo "$REPOSITORY" --json body --jq '.body' \
-              > /tmp/old-body.txt 2>/dev/null; then
-            body="$(sed '/^pdfcraft=/d; /^photocraft=/d; /^gridcraft=/d; /^filmcraft=/d; /^wordcraft=/d' /tmp/old-body.txt)"
+          # Use today's release as the base if it already exists.
+          # Otherwise download the most recent previous release.
+          if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            BASE_TAG="$RELEASE_TAG"
+          else
+            BASE_TAG="$(gh release list \
+              --repo "$REPOSITORY" \
+              --limit 100 \
+              --json tagName \
+              --jq --arg current "$RELEASE_TAG" \
+              '[.[] | select(.tagName != $current) | .tagName][0] // empty')"
           fi
 
+          echo "New release: $RELEASE_TAG"
+          echo "Base release: ${BASE_TAG:-none}"
+
+          # Download the existing AppImages to preserve unchanged apps.
+          if [[ -n "$BASE_TAG" ]]; then
+            gh release download "$BASE_TAG" \
+              --repo "$REPOSITORY" \
+              --pattern '*-latest-x86_64.AppImage' \
+              --dir previous
+
+            cp previous/*-latest-x86_64.AppImage release/
+          fi
+
+          # Replace only the applications rebuilt in this run.
+          for image in "${images[@]}"; do
+            cp "$image" release/
+          done
+
+          # Validate the complete five-app release.
+          expected=(
+            PdfCraft-latest-x86_64.AppImage
+            PhotoCraft-latest-x86_64.AppImage
+            GridCraft-latest-x86_64.AppImage
+            FilmCraft-latest-x86_64.AppImage
+            WordCraft-latest-x86_64.AppImage
+          )
+
+          for app_image in "${expected[@]}"; do
+            if [[ ! -s "release/$app_image" ]]; then
+              echo "Missing required AppImage: $app_image" >&2
+              echo "If this is the first release, build all five applications." >&2
+              exit 1
+            fi
+          done
+
+          # Start with the previous release's commit map.
+          body=""
+
+          if [[ -n "$BASE_TAG" ]]; then
+            gh release view "$BASE_TAG" \
+              --repo "$REPOSITORY" \
+              --json body \
+              --jq '.body' > /tmp/old-body.txt
+
+            body="$(sed \
+              '/^pdfcraft=/d; /^photocraft=/d; /^gridcraft=/d; /^filmcraft=/d; /^wordcraft=/d' \
+              /tmp/old-body.txt)"
+          fi
+
+          # Update commit records for applications built in this run.
           for commit_file in "${commits[@]}"; do
             app="$(basename "$commit_file" .commit)"
             sha="$(tr -d '\r\n' < "$commit_file")"
-            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid SHA for $app" >&2; exit 1; }
+
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "Invalid SHA for $app" >&2
+              exit 1
+            }
+
             body+=$'\n'"${app}=${sha}"
           done
 
-          cat > /tmp/release-notes.txt <<NOTES
-          Unofficial community AppImage builds from the latest upstream main branches.
+          # Generate checksums for all five AppImages.
+          release_images=(release/*-latest-x86_64.AppImage)
 
-          Download the five stable x86_64 AppImages below. Each application is rebuilt independently when its upstream commit changes.
+          if [[ ${#release_images[@]} -ne 5 ]]; then
+            echo "Expected five AppImages, found ${#release_images[@]}" >&2
+            exit 1
+          fi
+
+          sha256sum "${release_images[@]}" > release/SHA256SUMS
+
+          # Create release notes.
+          cat > /tmp/release-notes.txt <<NOTES
+          Unofficial community ArtCraft AppImage builds.
+
+          Version: ${RELEASE_TAG}
+
+          Download the five stable x86_64 AppImages below.
+          Each application is rebuilt independently when its upstream commit changes.
+
+          SHA256 checksums are provided in SHA256SUMS.
 
           Upstream commit map (machine-readable):
           ${body}
@@ -260,20 +404,35 @@ jobs:
           These builds are unofficial and are not endorsed by the upstream maintainers.
           NOTES
 
-          if gh release view artcraft-appimages --repo "$REPOSITORY" >/dev/null 2>&1; then
-            gh release upload artcraft-appimages "${images[@]}" \
-              --repo "$REPOSITORY" --clobber
-            gh release edit artcraft-appimages --repo "$REPOSITORY" \
-              --title "ArtCraft AppImages (latest)" \
+          # Upload assets or create a new dated release.
+          if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            echo "Updating existing release $RELEASE_TAG"
+
+            gh release upload "$RELEASE_TAG" \
+              "${release_images[@]}" \
+              release/SHA256SUMS \
+              --repo "$REPOSITORY" \
+              --clobber
+
+            gh release edit "$RELEASE_TAG" \
+              --repo "$REPOSITORY" \
+              --title "ArtCraft AppImages ${RELEASE_TAG}" \
               --notes-file /tmp/release-notes.txt \
               --latest
           else
-            gh release create artcraft-appimages "${images[@]}" \
+            echo "Creating release $RELEASE_TAG"
+
+            gh release create "$RELEASE_TAG" \
+              "${release_images[@]}" \
+              release/SHA256SUMS \
               --repo "$REPOSITORY" \
-              --title "ArtCraft AppImages (latest)" \
+              --title "ArtCraft AppImages ${RELEASE_TAG}" \
               --notes-file /tmp/release-notes.txt \
               --latest
           fi
 
-          echo "Published changed assets:"
-          printf ' - %s\n' "${images[@]}"
+          echo "Successfully published ${RELEASE_TAG}."
+
+          echo "Published assets:"
+          printf ' - %s\n' "${release_images[@]}"
+          echo " - SHA256SUMS"
