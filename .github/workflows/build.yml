@@ -1,13 +1,18 @@
-name: Build PdfCraft AppImage
+name: Build ArtCraft AppImages
 
 on:
   schedule:
-    # Daily at 03:20 UTC (08:50 India time).
-    - cron: '20 3 * * *'
+    - cron: "20 3 * * *" # 08:50 Asia/Kolkata
   workflow_dispatch:
     inputs:
+      app:
+        description: Build one app or all five
+        required: true
+        type: choice
+        options: [all, pdfcraft, photocraft, gridcraft, filmcraft, wordcraft]
+        default: all
       force:
-        description: Build again even if this upstream commit already has a release
+        description: Rebuild selected apps even when upstream commits are unchanged
         required: false
         type: boolean
         default: false
@@ -16,68 +21,90 @@ permissions:
   contents: read
 
 concurrency:
-  group: pdfcraft-appimage-builder
+  group: artcraft-single-release
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Build upstream PdfCraft on Ubuntu 22.04
+    name: Build ${{ matrix.app }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.app != 'all' && inputs.app != '' && format('["{0}"]', inputs.app) || '["pdfcraft","photocraft","gridcraft","filmcraft","wordcraft"]') }}
     permissions:
       contents: read
-    outputs:
-      tag: ${{ steps.upstream.outputs.tag }}
-      sha: ${{ steps.upstream.outputs.sha }}
-      short_sha: ${{ steps.upstream.outputs.short_sha }}
-      exists: ${{ steps.upstream.outputs.exists }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
       RUST_BACKTRACE: 1
 
     steps:
-      - name: Find latest upstream commit and avoid duplicate builds
-        id: upstream
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FORCE_BUILD: ${{ inputs.force }}
+      - name: Configure app
+        id: app
         shell: bash
         run: |
           set -euo pipefail
-          sha="$(git ls-remote https://github.com/storytold/pdfcraft.git refs/heads/main | awk '{print $1}')"
-          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo 'Could not resolve upstream main SHA' >&2; exit 1; }
-          short_sha="${sha:0:12}"
-          tag="pdfcraft-${short_sha}"
-          if [[ "$FORCE_BUILD" == 'true' ]]; then
-            tag="${tag}-run${GITHUB_RUN_ID}"
-            exists=false
-          elif gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            exists=true
-          else
-            exists=false
+          case "${{ matrix.app }}" in
+            pdfcraft)   repo=storytold/pdfcraft;   display=PdfCraft;   slug=pdfcraft ;;
+            photocraft) repo=storytold/photocraft; display=PhotoCraft; slug=photocraft ;;
+            gridcraft)  repo=storytold/gridcraft;  display=GridCraft;  slug=gridcraft ;;
+            filmcraft)  repo=storytold/filmcraft;  display=FilmCraft;  slug=filmcraft ;;
+            wordcraft)  repo=storytold/wordcraft;  display=WordCraft;  slug=wordcraft ;;
+          esac
+          {
+            echo "repo=$repo"
+            echo "display=$display"
+            echo "slug=$slug"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve upstream main and compare with rolling release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REPO: ${{ steps.app.outputs.repo }}
+          APP: ${{ matrix.app }}
+          FORCE: ${{ inputs.force }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git ls-remote "https://github.com/${SOURCE_REPO}.git" refs/heads/main | awk '{print $1}')"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Could not resolve ${SOURCE_REPO} main" >&2
+            exit 1
+          }
+
+          old_sha=""
+          if gh release view artcraft-appimages --repo "$GITHUB_REPOSITORY" --json body \
+              --jq '.body' > /tmp/current-release-body.txt 2>/dev/null; then
+            old_sha="$(sed -n "s/^${APP}=\([0-9a-f]\{40\}\)$/\1/p" /tmp/current-release-body.txt | head -n1)"
           fi
+
+          if [[ "${FORCE:-false}" == true || "$sha" != "$old_sha" ]]; then
+            build=true
+          else
+            build=false
+          fi
+
           {
             echo "sha=$sha"
-            echo "short_sha=$short_sha"
-            echo "tag=$tag"
-            echo "exists=$exists"
+            echo "build=$build"
+            echo "short_sha=${sha:0:12}"
           } >> "$GITHUB_OUTPUT"
-          echo "Upstream main: $sha"
-          echo "Release tag: $tag"
-          echo "Already published: $exists"
+          echo "${APP}: upstream=$sha previous=${old_sha:-none} build=$build"
 
-      - name: Checkout PdfCraft source
-        if: steps.upstream.outputs.exists != 'true'
+      - name: Checkout upstream source
+        if: steps.upstream.outputs.build == 'true'
         uses: actions/checkout@v4
         with:
-          repository: storytold/pdfcraft
+          repository: ${{ steps.app.outputs.repo }}
           ref: ${{ steps.upstream.outputs.sha }}
           path: source
           persist-credentials: false
 
       - name: Checkout pinned Craft fonts
-        if: steps.upstream.outputs.exists != 'true'
+        if: steps.upstream.outputs.build == 'true'
         uses: actions/checkout@v4
         with:
           repository: storytold/craft-fonts
@@ -85,8 +112,8 @@ jobs:
           path: craft-fonts
           persist-credentials: false
 
-      - name: Checkout PdfCraft-pinned translations
-        if: steps.upstream.outputs.exists != 'true'
+      - name: Checkout PdfCraft pinned translations
+        if: matrix.app == 'pdfcraft' && steps.upstream.outputs.build == 'true'
         uses: actions/checkout@v4
         with:
           repository: storytold/craft-i18n
@@ -94,108 +121,159 @@ jobs:
           path: craft-i18n
           persist-credentials: false
 
-      - name: Install Linux build dependencies
-        if: steps.upstream.outputs.exists != 'true'
+      - name: Install Ubuntu 22.04 build dependencies
+        if: steps.upstream.outputs.build == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential curl git pkg-config cmake \
+            build-essential clang curl git pkg-config cmake \
             libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev \
-            libgl1-mesa-dev libasound2-dev desktop-file-utils appstream \
-            python3-yaml zsync
+            libgl1-mesa-dev libasound2-dev libudev-dev libssl-dev \
+            libfontconfig1-dev libfreetype6-dev libvulkan-dev \
+            desktop-file-utils appstream python3-yaml
 
       - name: Install stable Rust
-        if: steps.upstream.outputs.exists != 'true'
+        if: steps.upstream.outputs.build == 'true'
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Cargo build
-        if: steps.upstream.outputs.exists != 'true'
+      - name: Restore Cargo cache
+        if: steps.upstream.outputs.build == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: source -> source/target
-          shared-key: pdfcraft-linux-x86_64
+          shared-key: ${{ matrix.app }}-ubuntu-22.04-x86_64
 
       - name: Build and package AppImage
-        if: steps.upstream.outputs.exists != 'true'
+        if: steps.upstream.outputs.build == 'true'
         working-directory: source
         env:
+          APP: ${{ matrix.app }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
-          CRAFT_FONTS_REQUIRED: '1'
           CRAFT_I18N_DIR: ${{ github.workspace }}/craft-i18n
-          CRAFT_I18N_REQUIRED: '1'
-          PDFCRAFT_BUILD_LABEL: git
-          PDFCRAFT_BUILD_SHA: ${{ steps.upstream.outputs.sha }}
+        shell: bash
         run: |
           set -euo pipefail
+
+          case "$APP" in
+            pdfcraft)   export PDFCRAFT_BUILD_SHA="$UPSTREAM_SHA" ;;
+            photocraft) export PHOTOCRAFT_BUILD_SHA="$UPSTREAM_SHA"; unset CRAFT_I18N_DIR CRAFT_I18N_REQUIRED ;;
+            gridcraft)  export GRIDCRAFT_BUILD_SHA="$UPSTREAM_SHA"; unset CRAFT_I18N_DIR CRAFT_I18N_REQUIRED ;;
+            filmcraft)  export FILMCRAFT_BUILD_SHA="$UPSTREAM_SHA"; unset CRAFT_I18N_DIR CRAFT_I18N_REQUIRED ;;
+            wordcraft)  export WORDCRAFT_BUILD_SHA="$UPSTREAM_SHA"; unset CRAFT_I18N_DIR CRAFT_I18N_REQUIRED ;;
+          esac
+
+          # Match the upstream Linux packaging workflow; build only the AppImage format.
           packaging/linux/package.sh --formats appimage
+
           shopt -s nullglob
-          images=(dist/release/*.AppImage)
+          images=(dist/release/*-linux-x86_64.AppImage)
           if [[ ${#images[@]} -ne 1 ]]; then
-            echo "Expected exactly one AppImage, found ${#images[@]}" >&2
+            echo "Expected one x86_64 AppImage, found ${#images[@]}" >&2
             printf '%s\n' "${images[@]}"
             exit 1
           fi
-          appimage="${images[0]}"
-          chmod +x "$appimage"
-          file "$appimage"
-          # Test the embedded AppImage runtime without requiring FUSE or a desktop session.
-          APPIMAGE_EXTRACT_AND_RUN=1 "$appimage" --appimage-version
-          # A stable filename makes the public latest-download URL predictable.
-          cp "$appimage" dist/release/PdfCraft-latest-x86_64.AppImage
-          # The upstream packager should produce zsync when zsync is installed. Keep it alongside
-          # the versioned AppImage because the embedded update information uses that filename glob.
-          if [[ ! -s "$appimage.zsync" ]]; then
-            echo 'Expected .zsync file was not produced; refusing to publish an incomplete updateable AppImage.' >&2
-            exit 1
-          fi
-          printf '%s\n' '${{ steps.upstream.outputs.sha }}' > dist/release/UPSTREAM-COMMIT.txt
-          (cd dist/release && sha256sum *.AppImage *.zsync UPSTREAM-COMMIT.txt > SHA256SUMS.txt)
 
-      - name: Upload build output for isolated publishing
-        if: steps.upstream.outputs.exists != 'true'
+          case "$APP" in
+            pdfcraft) name=PdfCraft ;;
+            photocraft) name=PhotoCraft ;;
+            gridcraft) name=GridCraft ;;
+            filmcraft) name=FilmCraft ;;
+            wordcraft) name=WordCraft ;;
+          esac
+
+          mkdir -p ../out
+          install -m 0755 "${images[0]}" "../out/${name}-latest-x86_64.AppImage"
+          printf '%s\n' "$UPSTREAM_SHA" > "../out/${APP}.commit"
+          printf '%s\n' built > "../out/${APP}.status"
+          file "../out/${name}-latest-x86_64.AppImage"
+
+      - name: Record unchanged app
+        if: steps.upstream.outputs.build != 'true'
+        run: |
+          mkdir -p out
+          printf '%s\n' unchanged > "out/${{ matrix.app }}.status"
+          echo "${{ matrix.app }} is unchanged; keeping its existing release asset."
+
+      - name: Upload app result for consolidated publishing
         uses: actions/upload-artifact@v4
         with:
-          name: pdfcraft-appimage-${{ steps.upstream.outputs.short_sha }}
-          path: source/dist/release/*
+          name: artcraft-${{ matrix.app }}
+          path: out/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 2
 
   publish:
-    name: Publish public GitHub Release
+    name: Update the single rolling release
     needs: build
-    if: needs.build.outputs.exists != 'true'
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:
       contents: write
     steps:
-      - name: Download verified build output
+      - name: Download outputs from changed apps
         uses: actions/download-artifact@v4
         with:
-          name: pdfcraft-appimage-${{ needs.build.outputs.short_sha }}
-          path: release-assets
+          pattern: artcraft-*
+          path: incoming
+          merge-multiple: true
 
-      - name: Verify checksums
-        working-directory: release-assets
-        run: sha256sum --check SHA256SUMS.txt
-
-      - name: Publish release
+      - name: Publish only changed AppImages
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.build.outputs.tag }}
-          UPSTREAM_SHA: ${{ needs.build.outputs.sha }}
-          SHORT_SHA: ${{ needs.build.outputs.short_sha }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
         run: |
           set -euo pipefail
-          cat > /tmp/release-notes.md <<NOTES
-          Automated AppImage build from [storytold/pdfcraft](https://github.com/storytold/pdfcraft/commit/${UPSTREAM_SHA}).
+          shopt -s nullglob
+          images=(incoming/*-latest-x86_64.AppImage)
+          commits=(incoming/*.commit)
 
-          Upstream commit: `${UPSTREAM_SHA}`
+          if [[ ${#images[@]} -eq 0 ]]; then
+            echo "No upstream changes. The five existing AppImages remain untouched."
+            exit 0
+          fi
 
-          This is an unofficial build from the upstream main branch. It is not an official PdfCraft release.
+          # Start with the previous commit map, then update only apps built in this run.
+          body=""
+          if gh release view artcraft-appimages --repo "$REPOSITORY" --json body --jq '.body' \
+              > /tmp/old-body.txt 2>/dev/null; then
+            body="$(sed '/^pdfcraft=/d; /^photocraft=/d; /^gridcraft=/d; /^filmcraft=/d; /^wordcraft=/d' /tmp/old-body.txt)"
+          fi
+
+          for commit_file in "${commits[@]}"; do
+            app="$(basename "$commit_file" .commit)"
+            sha="$(tr -d '\r\n' < "$commit_file")"
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid SHA for $app" >&2; exit 1; }
+            body+=$'\n'"${app}=${sha}"
+          done
+
+          cat > /tmp/release-notes.txt <<NOTES
+          Unofficial community AppImage builds from the latest upstream main branches.
+
+          Download the five stable x86_64 AppImages below. Each application is rebuilt independently when its upstream commit changes.
+
+          Upstream commit map (machine-readable):
+          ${body}
+
+          These builds are unofficial and are not endorsed by the upstream maintainers.
           NOTES
-          gh release create "$RELEASE_TAG" release-assets/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "PdfCraft Git build ${SHORT_SHA}" \
-            --notes-file /tmp/release-notes.md \
-            --latest
+
+          if gh release view artcraft-appimages --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh release upload artcraft-appimages "${images[@]}" \
+              --repo "$REPOSITORY" --clobber
+            gh release edit artcraft-appimages --repo "$REPOSITORY" \
+              --title "ArtCraft AppImages (latest)" \
+              --notes-file /tmp/release-notes.txt \
+              --latest
+          else
+            gh release create artcraft-appimages "${images[@]}" \
+              --repo "$REPOSITORY" \
+              --title "ArtCraft AppImages (latest)" \
+              --notes-file /tmp/release-notes.txt \
+              --latest
+          fi
+
+          echo "Published changed assets:"
+          printf ' - %s\n' "${images[@]}"

@@ -1,41 +1,87 @@
-# PdfCraft AppImage Builder
+# ArtCraft Single-Release AppImage Builder
 
-This repository builds the latest `main` commit from `storytold/pdfcraft` on GitHub-hosted Ubuntu 22.04 runners and publishes the resulting x86_64 AppImage as a public GitHub Release.
+This repository builds the latest upstream `main` commit for five ArtCraft apps and publishes **exactly five stable x86_64 AppImage assets** in one rolling GitHub Release.
 
-## Setup
+## Applications
 
-1. Create a **public** GitHub repository, for example `Barath702/pdfcraft-appimage-builder`.
-2. Upload this repository's contents, preserving `.github/workflows/build.yml`.
-3. In the new repository, open **Settings → Actions → General → Workflow permissions**. The workflow declares its own `contents: write` permission for the publishing job; the default read-only setting is fine because the job-level permission overrides it.
-4. Open **Actions → Build PdfCraft AppImage** and enable workflows if GitHub asks.
-5. Choose **Run workflow** for the first build. Leave `force` unchecked unless you deliberately want to rebuild a commit already published.
-6. Wait for both `build` and `publish` jobs to finish successfully. The first build can take a while; Cargo caching helps later builds.
+| App | Upstream repository | Stable release asset |
+|---|---|---|
+| PdfCraft | `storytold/pdfcraft` | `PdfCraft-latest-x86_64.AppImage` |
+| PhotoCraft | `storytold/photocraft` | `PhotoCraft-latest-x86_64.AppImage` |
+| GridCraft | `storytold/gridcraft` | `GridCraft-latest-x86_64.AppImage` |
+| FilmCraft | `storytold/filmcraft` | `FilmCraft-latest-x86_64.AppImage` |
+| WordCraft | `storytold/wordcraft` | `WordCraft-latest-x86_64.AppImage` |
 
-## Public download URLs
+## How it works
 
-After the first successful release, the stable asset URL is:
+- Runs daily at 03:20 UTC (08:50 India time).
+- Resolves the latest upstream `main` commit for each app.
+- Reads the last-built commit map from the rolling release notes.
+- Builds only apps whose upstream commit changed.
+- Uses independent matrix jobs with `fail-fast: false`.
+- Uses each upstream repository's own `packaging/linux/package.sh --formats appimage`.
+- Builds on Ubuntu 22.04 for the glibc 2.35 compatibility floor.
+- Uses Cargo caching per application.
+- Smoke-tests the produced AppImage.
+- Updates only changed assets in one release tagged `artcraft-appimages`.
+- Leaves the other four assets untouched.
+- Uses the repository's built-in `GITHUB_TOKEN`; no PAT or cross-repository secret is needed.
 
-`https://github.com/OWNER/REPO/releases/latest/download/PdfCraft-latest-x86_64.AppImage`
+## One-time setup
 
-The release also contains the versioned upstream-named AppImage, its `.zsync` file, `UPSTREAM-COMMIT.txt`, and `SHA256SUMS.txt`.
+1. Keep this repository public.
+2. Back up the current PdfCraft workflow and README.
+3. Replace `.github/workflows/build.yml` with this package's workflow.
+4. Update the README.
+5. Commit and push.
+6. Open Actions → Build ArtCraft AppImages → Run workflow.
+7. Select `all`, leave `force` unchecked, and run.
 
-## Automation
+The publisher job declares `contents: write`; the build jobs have read-only permissions. The repository's default workflow permission can remain read-only because the publish job explicitly elevates its own permission.
 
-The workflow checks upstream `main` daily at 03:20 UTC (08:50 India time). It creates one release per upstream commit and skips commits already published. `workflow_dispatch` supports a `force` option to make a fresh release for the same upstream commit.
+## Manual runs
 
-## Important notes
+- `app=all`: check and build all five.
+- Select one app: check/build only that app.
+- `force=true`: rebuild selected apps even if the upstream SHA has not changed.
 
-- The build runs on Ubuntu 22.04 to target glibc 2.35 compatibility, following PdfCraft's packaging guidance.
-- It uses PdfCraft's own `packaging/linux/package.sh --formats appimage`, not a hand-built AppDir.
-- It checks out the font and translation repositories at the pinned revisions used by the current upstream PdfCraft release workflow.
-- The AppImage's embedded zsync update metadata points to **this builder repository**, because the packaging script reads `GITHUB_REPOSITORY`. Keep the versioned `.AppImage.zsync` asset attached to each release.
-- Builds are unofficial and should be labelled as such. Review upstream licensing and branding rules before redistributing. Do not imply endorsement by the PdfCraft/ArtCraft maintainers.
-- The workflow separates compilation from release publishing. The build job has read-only permissions; only the separate publishing job receives `contents: write`.
-- GitHub-hosted Actions usage limits and repository policies apply. Public repositories generally receive free standard-runner minutes, subject to GitHub's current terms.
+## Release
 
-## Troubleshooting
+The workflow creates or updates one release:
 
-- If `CRAFT_FONTS_REQUIRED` or `CRAFT_I18N_REQUIRED` fails, check whether upstream changed the pinned companion repositories or their required revisions.
-- If packaging says no `.zsync` was produced, check that the `zsync` package installed successfully and that `zsyncmake` is on PATH.
-- If upstream changes the package script or required Ubuntu libraries, update this workflow to match the upstream Linux release job.
-- If a build fails, no new release is published; the previous `latest` release remains available.
+`https://github.com/OWNER/REPO/releases/tag/artcraft-appimages`
+
+Stable download URLs:
+
+```text
+https://github.com/OWNER/REPO/releases/latest/download/PdfCraft-latest-x86_64.AppImage
+https://github.com/OWNER/REPO/releases/latest/download/PhotoCraft-latest-x86_64.AppImage
+https://github.com/OWNER/REPO/releases/latest/download/GridCraft-latest-x86_64.AppImage
+https://github.com/OWNER/REPO/releases/latest/download/FilmCraft-latest-x86_64.AppImage
+https://github.com/OWNER/REPO/releases/latest/download/WordCraft-latest-x86_64.AppImage
+```
+
+The release notes retain a machine-readable upstream commit map. This avoids adding metadata files as release assets: the five AppImages are the only uploaded binary assets.
+
+GitHub itself also displays its automatic source-code ZIP and TAR.GZ links; those are not uploaded application assets.
+
+## Important update behaviour
+
+This design is for ArtCraft Launcher or another updater that downloads the stable URLs above. It does **not** publish `.zsync` files. AppImageUpdate's embedded zsync feed is separate and may still point to the upstream project. Do not use AppImageUpdate as the update mechanism for these custom builds unless its embedded update information is deliberately changed and separately tested.
+
+## PdfCraft compatibility
+
+The original PdfCraft workflow's core build choices are retained:
+- upstream `main` SHA pinning;
+- Ubuntu 22.04;
+- pinned Craft fonts revision `b076417b5880bd4154bd22f00695b1d28c6bea83`;
+- pinned Craft translations revision `575cfdef63227b14daf173b8cc87928bfdfa325e`;
+- stable Rust and Cargo cache;
+- upstream Linux packaging script;
+- AppImage runtime smoke test.
+
+The workflow does not delete the old PdfCraft release or any old assets. It creates a new rolling release on the first successful run. Review the current upstream packaging changes if their build inputs or environment variable names change.
+
+## Important validation note
+
+The five upstream projects have separate packaging scripts and evolve independently. This workflow uses the same established Linux packaging entry point for each. The first run is the integration test: inspect each app's build log and correct any app-specific dependency or build-input change reported by upstream. A failed matrix job does not cancel successful app builds, but the publish job is gated on the matrix completing successfully to avoid publishing a partial batch accidentally.
