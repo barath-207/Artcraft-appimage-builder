@@ -1,0 +1,201 @@
+name: Build PdfCraft AppImage
+
+on:
+  schedule:
+    # Daily at 03:20 UTC (08:50 India time).
+    - cron: '20 3 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build again even if this upstream commit already has a release
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pdfcraft-appimage-builder
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build upstream PdfCraft on Ubuntu 22.04
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.upstream.outputs.tag }}
+      sha: ${{ steps.upstream.outputs.sha }}
+      short_sha: ${{ steps.upstream.outputs.short_sha }}
+      exists: ${{ steps.upstream.outputs.exists }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+
+    steps:
+      - name: Find latest upstream commit and avoid duplicate builds
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_BUILD: ${{ inputs.force }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git ls-remote https://github.com/storytold/pdfcraft.git refs/heads/main | awk '{print $1}')"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo 'Could not resolve upstream main SHA' >&2; exit 1; }
+          short_sha="${sha:0:12}"
+          tag="pdfcraft-${short_sha}"
+          if [[ "$FORCE_BUILD" == 'true' ]]; then
+            tag="${tag}-run${GITHUB_RUN_ID}"
+            exists=false
+          elif gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            exists=true
+          else
+            exists=false
+          fi
+          {
+            echo "sha=$sha"
+            echo "short_sha=$short_sha"
+            echo "tag=$tag"
+            echo "exists=$exists"
+          } >> "$GITHUB_OUTPUT"
+          echo "Upstream main: $sha"
+          echo "Release tag: $tag"
+          echo "Already published: $exists"
+
+      - name: Checkout PdfCraft source
+        if: steps.upstream.outputs.exists != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: storytold/pdfcraft
+          ref: ${{ steps.upstream.outputs.sha }}
+          path: source
+          persist-credentials: false
+
+      - name: Checkout pinned Craft fonts
+        if: steps.upstream.outputs.exists != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: storytold/craft-fonts
+          ref: b076417b5880bd4154bd22f00695b1d28c6bea83
+          path: craft-fonts
+          persist-credentials: false
+
+      - name: Checkout PdfCraft-pinned translations
+        if: steps.upstream.outputs.exists != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: storytold/craft-i18n
+          ref: 575cfdef63227b14daf173b8cc87928bfdfa325e
+          path: craft-i18n
+          persist-credentials: false
+
+      - name: Install Linux build dependencies
+        if: steps.upstream.outputs.exists != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl git pkg-config cmake \
+            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev \
+            libgl1-mesa-dev libasound2-dev desktop-file-utils appstream \
+            python3-yaml zsync
+
+      - name: Install stable Rust
+        if: steps.upstream.outputs.exists != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build
+        if: steps.upstream.outputs.exists != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source -> source/target
+          shared-key: pdfcraft-linux-x86_64
+
+      - name: Build and package AppImage
+        if: steps.upstream.outputs.exists != 'true'
+        working-directory: source
+        env:
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: '1'
+          CRAFT_I18N_DIR: ${{ github.workspace }}/craft-i18n
+          CRAFT_I18N_REQUIRED: '1'
+          PDFCRAFT_BUILD_LABEL: git
+          PDFCRAFT_BUILD_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+          packaging/linux/package.sh --formats appimage
+          shopt -s nullglob
+          images=(dist/release/*.AppImage)
+          if [[ ${#images[@]} -ne 1 ]]; then
+            echo "Expected exactly one AppImage, found ${#images[@]}" >&2
+            printf '%s\n' "${images[@]}"
+            exit 1
+          fi
+          appimage="${images[0]}"
+          chmod +x "$appimage"
+          file "$appimage"
+          # Test the embedded AppImage runtime without requiring FUSE or a desktop session.
+          APPIMAGE_EXTRACT_AND_RUN=1 "$appimage" --appimage-version
+          # A stable filename makes the public latest-download URL predictable.
+          cp "$appimage" dist/release/PdfCraft-latest-x86_64.AppImage
+          # The upstream packager should produce zsync when zsync is installed. Keep it alongside
+          # the versioned AppImage because the embedded update information uses that filename glob.
+          if [[ ! -s "$appimage.zsync" ]]; then
+            echo 'Expected .zsync file was not produced; refusing to publish an incomplete updateable AppImage.' >&2
+            exit 1
+          fi
+          printf '%s\n' '${{ steps.upstream.outputs.sha }}' > dist/release/UPSTREAM-COMMIT.txt
+          (cd dist/release && sha256sum *.AppImage *.zsync UPSTREAM-COMMIT.txt > SHA256SUMS.txt)
+
+      - name: Upload build output for isolated publishing
+        if: steps.upstream.outputs.exists != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdfcraft-appimage-${{ steps.upstream.outputs.short_sha }}
+          path: source/dist/release/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish public GitHub Release
+    needs: build
+    if: needs.build.outputs.exists != 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified build output
+        uses: actions/download-artifact@v4
+        with:
+          name: pdfcraft-appimage-${{ needs.build.outputs.short_sha }}
+          path: release-assets
+
+      - name: Verify checksums
+        working-directory: release-assets
+        run: sha256sum --check SHA256SUMS.txt
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          UPSTREAM_SHA: ${{ needs.build.outputs.sha }}
+          SHORT_SHA: ${{ needs.build.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/release-notes.md <<NOTES
+          Automated AppImage build from [storytold/pdfcraft](https://github.com/storytold/pdfcraft/commit/${UPSTREAM_SHA}).
+
+          Upstream commit: `${UPSTREAM_SHA}`
+
+          This is an unofficial build from the upstream main branch. It is not an official PdfCraft release.
+          NOTES
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "PdfCraft Git build ${SHORT_SHA}" \
+            --notes-file /tmp/release-notes.md \
+            --latest
