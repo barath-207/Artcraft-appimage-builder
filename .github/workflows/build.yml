@@ -78,10 +78,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Date-based release tag (India time).
           current_tag="v$(TZ=Asia/Kolkata date +'%Y.%m.%d')"
 
-          # Resolve the upstream main branch.
           sha="$(git ls-remote "https://github.com/${SOURCE_REPO}.git" refs/heads/main | awk '{print $1}')"
 
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || {
@@ -89,17 +87,17 @@ jobs:
             exit 1
           }
 
-          # Prefer today's release if it already exists.
-          # Otherwise use the most recent previous release.
           if gh release view "$current_tag" --repo "$REPOSITORY" >/dev/null 2>&1; then
             baseline_tag="$current_tag"
           else
-            baseline_tag="$(gh release list \
-              --repo "$REPOSITORY" \
-              --limit 100 \
-              --json tagName \
-              --jq --arg current "$current_tag" \
-              '[.[] | select(.tagName != $current) | .tagName][0] // empty')"
+            baseline_tag="$(
+              gh release list \
+                --repo "$REPOSITORY" \
+                --limit 100 \
+                --json tagName |
+              jq -r --arg current "$current_tag" \
+                '[.[] | select(.tagName != $current) | .tagName][0] // empty'
+            )"
           fi
 
           old_sha=""
@@ -216,7 +214,6 @@ jobs:
               ;;
           esac
 
-          # Build only the AppImage format.
           packaging/linux/package.sh --formats appimage
 
           shopt -s nullglob
@@ -288,7 +285,6 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
 
-          # Generate the version using India local date.
           RELEASE_TAG="v$(TZ=Asia/Kolkata date +'%Y.%m.%d')"
 
           mkdir -p release previous
@@ -296,29 +292,27 @@ jobs:
           images=(incoming/*-latest-x86_64.AppImage)
           commits=(incoming/*.commit)
 
-          # No new builds means no new release is required.
           if [[ ${#images[@]} -eq 0 ]]; then
             echo "No upstream changes. Existing release remains untouched."
             exit 0
           fi
 
-          # Use today's release as the base if it already exists.
-          # Otherwise download the most recent previous release.
           if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
             BASE_TAG="$RELEASE_TAG"
           else
-            BASE_TAG="$(gh release list \
-              --repo "$REPOSITORY" \
-              --limit 100 \
-              --json tagName \
-              --jq --arg current "$RELEASE_TAG" \
-              '[.[] | select(.tagName != $current) | .tagName][0] // empty')"
+            BASE_TAG="$(
+              gh release list \
+                --repo "$REPOSITORY" \
+                --limit 100 \
+                --json tagName |
+              jq -r --arg current "$RELEASE_TAG" \
+                '[.[] | select(.tagName != $current) | .tagName][0] // empty'
+            )"
           fi
 
           echo "New release: $RELEASE_TAG"
           echo "Base release: ${BASE_TAG:-none}"
 
-          # Download the existing AppImages to preserve unchanged apps.
           if [[ -n "$BASE_TAG" ]]; then
             gh release download "$BASE_TAG" \
               --repo "$REPOSITORY" \
@@ -328,12 +322,10 @@ jobs:
             cp previous/*-latest-x86_64.AppImage release/
           fi
 
-          # Replace only the applications rebuilt in this run.
           for image in "${images[@]}"; do
             cp "$image" release/
           done
 
-          # Validate the complete five-app release.
           expected=(
             PdfCraft-latest-x86_64.AppImage
             PhotoCraft-latest-x86_64.AppImage
@@ -350,7 +342,6 @@ jobs:
             fi
           done
 
-          # Start with the previous release's commit map.
           body=""
 
           if [[ -n "$BASE_TAG" ]]; then
@@ -364,7 +355,6 @@ jobs:
               /tmp/old-body.txt)"
           fi
 
-          # Update commit records for applications built in this run.
           for commit_file in "${commits[@]}"; do
             app="$(basename "$commit_file" .commit)"
             sha="$(tr -d '\r\n' < "$commit_file")"
@@ -377,7 +367,6 @@ jobs:
             body+=$'\n'"${app}=${sha}"
           done
 
-          # Generate checksums for all five AppImages.
           release_images=(release/*-latest-x86_64.AppImage)
 
           if [[ ${#release_images[@]} -ne 5 ]]; then
@@ -385,9 +374,11 @@ jobs:
             exit 1
           fi
 
-          sha256sum "${release_images[@]}" > release/SHA256SUMS
+          (
+            cd release
+            sha256sum ./*-latest-x86_64.AppImage > SHA256SUMS
+          )
 
-          # Create release notes.
           cat > /tmp/release-notes.txt <<NOTES
           Unofficial community ArtCraft AppImage builds.
 
@@ -404,7 +395,6 @@ jobs:
           These builds are unofficial and are not endorsed by the upstream maintainers.
           NOTES
 
-          # Upload assets or create a new dated release.
           if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
             echo "Updating existing release $RELEASE_TAG"
 
