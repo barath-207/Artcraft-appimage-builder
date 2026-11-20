@@ -315,7 +315,7 @@ jobs:
 
           Version: ${tag}
           Upstream repository: https://github.com/storytold/${app}
-          Upstream commit: ${sha}
+          Upstream commit:=${sha}
 
           SHA256 checksum: see SHA256SUMS.
 
