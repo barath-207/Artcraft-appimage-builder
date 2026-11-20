@@ -100,6 +100,22 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Scheduled cadence: all apps every 2 days; PhotoCraft every 4 days.
+          # The anchor date is 2026-11-20 in Asia/Kolkata.
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            anchor_epoch="$(TZ=Asia/Kolkata date -d '2026-11-20 00:00:00' +%s)"
+            today_epoch="$(TZ=Asia/Kolkata date -d "$(TZ=Asia/Kolkata date +%F) 00:00:00" +%s)"
+            days_since_anchor=$(( (today_epoch - anchor_epoch) / 86400 ))
+            interval=2
+            [[ "$APP" == "photocraft" ]] && interval=4
+
+            if (( days_since_anchor < 0 || days_since_anchor % interval != 0 )); then
+              echo "build=false" >> "$GITHUB_OUTPUT"
+              echo "Skipping $APP: scheduled interval is every ${interval} days from 2026-11-20 IST."
+              exit 0
+            fi
+          fi
+
           release_tag="v$(TZ=Asia/Kolkata date +'%Y.%m.%d')"
 
           sha="$(git ls-remote "https://github.com/${SOURCE_REPO}.git" refs/heads/main | awk '{print $1}')"
@@ -315,7 +331,7 @@ jobs:
 
           Version: ${tag}
           Upstream repository: https://github.com/storytold/${app}
-          Upstream commit:=${sha}
+          upstream_commit=${sha}
 
           SHA256 checksum: see SHA256SUMS.
 
