@@ -1,4 +1,3 @@
-
 name: Build ArtCraft AppImages
 
 on:
@@ -22,7 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: artcraft-single-release
+  group: artcraft-multi-repo-release
   cancel-in-progress: false
 
 jobs:
@@ -52,33 +51,56 @@ jobs:
           set -euo pipefail
 
           case "${{ matrix.app }}" in
-            pdfcraft)   repo=storytold/pdfcraft;   display=PdfCraft;   slug=pdfcraft ;;
-            photocraft) repo=storytold/photocraft; display=PhotoCraft; slug=photocraft ;;
-            gridcraft)  repo=storytold/gridcraft;  display=GridCraft;  slug=gridcraft ;;
-            filmcraft)  repo=storytold/filmcraft;  display=FilmCraft;  slug=filmcraft ;;
-            wordcraft)  repo=storytold/wordcraft;  display=WordCraft;  slug=wordcraft ;;
-            *) echo "Unknown application" >&2; exit 1 ;;
+            pdfcraft)
+              repo=storytold/pdfcraft
+              display=PdfCraft
+              target=barath-207/pdfcraft-appimage
+              ;;
+            photocraft)
+              repo=storytold/photocraft
+              display=PhotoCraft
+              target=barath-207/photocraft-appimage
+              ;;
+            gridcraft)
+              repo=storytold/gridcraft
+              display=GridCraft
+              target=barath-207/gridcraft-appimage
+              ;;
+            filmcraft)
+              repo=storytold/filmcraft
+              display=FilmCraft
+              target=barath-207/filmcraft-appimage
+              ;;
+            wordcraft)
+              repo=storytold/wordcraft
+              display=WordCraft
+              target=barath-207/wordcraft-appimage
+              ;;
+            *)
+              echo "Unknown application" >&2
+              exit 1
+              ;;
           esac
 
           {
             echo "repo=$repo"
             echo "display=$display"
-            echo "slug=$slug"
+            echo "target=$target"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Resolve upstream and compare with latest release
+      - name: Resolve upstream and compare with app's latest release
         id: upstream
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.ARTCRAFT_RELEASE_TOKEN }}
           SOURCE_REPO: ${{ steps.app.outputs.repo }}
+          TARGET_REPO: ${{ steps.app.outputs.target }}
           APP: ${{ matrix.app }}
-          FORCE: ${{ inputs.force }}
-          REPOSITORY: ${{ github.repository }}
+          FORCE: ${{ inputs.force || false }}
         shell: bash
         run: |
           set -euo pipefail
 
-          current_tag="v$(TZ=Asia/Kolkata date +'%Y.%m.%d')"
+          release_tag="v$(TZ=Asia/Kolkata date +'%Y.%m.%d')"
 
           sha="$(git ls-remote "https://github.com/${SOURCE_REPO}.git" refs/heads/main | awk '{print $1}')"
 
@@ -87,31 +109,14 @@ jobs:
             exit 1
           }
 
-          if gh release view "$current_tag" --repo "$REPOSITORY" >/dev/null 2>&1; then
-            baseline_tag="$current_tag"
-          else
-            baseline_tag="$(
-              gh release list \
-                --repo "$REPOSITORY" \
-                --limit 100 \
-                --json tagName |
-              jq -r --arg current "$current_tag" \
-                '[.[] | select(.tagName != $current) | .tagName][0] // empty'
-            )"
-          fi
-
           old_sha=""
-
-          if [[ -n "$baseline_tag" ]]; then
-            if gh release view "$baseline_tag" --repo "$REPOSITORY" --json body \
-                --jq '.body' > /tmp/current-release-body.txt 2>/dev/null; then
-
-              old_sha="$(sed -n "s/^${APP}=\([0-9a-f]\{40\}\)$/\1/p" \
-                /tmp/current-release-body.txt | head -n1)"
-            fi
+          if gh release view --repo "$TARGET_REPO" --json body \
+              --jq '.body' > /tmp/latest-release-body.txt 2>/dev/null; then
+            old_sha="$(sed -n 's/^upstream_commit=\([0-9a-f]\{40\}\)$/\1/p' \
+              /tmp/latest-release-body.txt | head -n1)"
           fi
 
-          if [[ "${FORCE:-false}" == true || "$sha" != "$old_sha" ]]; then
+          if [[ "$FORCE" == "true" || "$sha" != "$old_sha" ]]; then
             build=true
           else
             build=false
@@ -120,14 +125,13 @@ jobs:
           {
             echo "sha=$sha"
             echo "build=$build"
-            echo "short_sha=${sha:0:12}"
-            echo "release_tag=$current_tag"
+            echo "release_tag=$release_tag"
           } >> "$GITHUB_OUTPUT"
 
           echo "Application: $APP"
+          echo "Target: $TARGET_REPO"
           echo "Upstream: $sha"
-          echo "Previous: ${old_sha:-none}"
-          echo "Baseline release: ${baseline_tag:-none}"
+          echo "Previous release commit: ${old_sha:-none}"
           echo "Build required: $build"
 
       - name: Checkout upstream source
@@ -161,7 +165,6 @@ jobs:
         if: steps.upstream.outputs.build == 'true'
         run: |
           sudo apt-get update
-
           sudo apt-get install -y --no-install-recommends \
             build-essential clang curl git pkg-config cmake \
             libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev \
@@ -234,12 +237,8 @@ jobs:
           esac
 
           mkdir -p ../out
-
-          install -m 0755 "${images[0]}" \
-            "../out/${name}-latest-x86_64.AppImage"
-
+          install -m 0755 "${images[0]}" "../out/${name}-latest-x86_64.AppImage"
           printf '%s\n' "$UPSTREAM_SHA" > "../out/${APP}.commit"
-          printf '%s\n' built > "../out/${APP}.status"
 
           file "../out/${name}-latest-x86_64.AppImage"
 
@@ -250,7 +249,7 @@ jobs:
           printf '%s\n' unchanged > "out/${{ matrix.app }}.status"
           echo "${{ matrix.app }} is unchanged."
 
-      - name: Upload app result for consolidated publishing
+      - name: Upload app result
         uses: actions/upload-artifact@v4
         with:
           name: artcraft-${{ matrix.app }}
@@ -259,170 +258,137 @@ jobs:
           retention-days: 2
 
   publish:
-    name: Publish versioned ArtCraft release
+    name: Publish changed apps to individual repositories
     needs: build
     if: always() && needs.build.result == 'success'
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     permissions:
-      contents: write
+      contents: read
 
     steps:
-      - name: Download outputs from all apps
+      - name: Download outputs from app builds
         uses: actions/download-artifact@v4
         with:
           pattern: artcraft-*
           path: incoming
           merge-multiple: true
 
-      - name: Assemble and publish complete release
+      - name: Publish changed AppImages
         env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.ARTCRAFT_RELEASE_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
 
-          RELEASE_TAG="v$(TZ=Asia/Kolkata date +'%Y.%m.%d')"
+          publish_app() {
+            local app="$1"
+            local display="$2"
+            local target="$3"
+            local image="$4"
+            local commit_file="$5"
+            local tag sha checksum_dir
 
-          mkdir -p release previous
-
-          images=(incoming/*-latest-x86_64.AppImage)
-          commits=(incoming/*.commit)
-
-          if [[ ${#images[@]} -eq 0 ]]; then
-            echo "No upstream changes. Existing release remains untouched."
-            exit 0
-          fi
-
-          if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
-            BASE_TAG="$RELEASE_TAG"
-          else
-            BASE_TAG="$(
-              gh release list \
-                --repo "$REPOSITORY" \
-                --limit 100 \
-                --json tagName |
-              jq -r --arg current "$RELEASE_TAG" \
-                '[.[] | select(.tagName != $current) | .tagName][0] // empty'
-            )"
-          fi
-
-          echo "New release: $RELEASE_TAG"
-          echo "Base release: ${BASE_TAG:-none}"
-
-          if [[ -n "$BASE_TAG" ]]; then
-            gh release download "$BASE_TAG" \
-              --repo "$REPOSITORY" \
-              --pattern '*-latest-x86_64.AppImage' \
-              --dir previous
-
-            cp previous/*-latest-x86_64.AppImage release/
-          fi
-
-          for image in "${images[@]}"; do
-            cp "$image" release/
-          done
-
-          expected=(
-            PdfCraft-latest-x86_64.AppImage
-            PhotoCraft-latest-x86_64.AppImage
-            GridCraft-latest-x86_64.AppImage
-            FilmCraft-latest-x86_64.AppImage
-            WordCraft-latest-x86_64.AppImage
-          )
-
-          for app_image in "${expected[@]}"; do
-            if [[ ! -s "release/$app_image" ]]; then
-              echo "Missing required AppImage: $app_image" >&2
-              echo "If this is the first release, build all five applications." >&2
-              exit 1
-            fi
-          done
-
-          body=""
-
-          if [[ -n "$BASE_TAG" ]]; then
-            gh release view "$BASE_TAG" \
-              --repo "$REPOSITORY" \
-              --json body \
-              --jq '.body' > /tmp/old-body.txt
-
-            body="$(sed \
-              '/^pdfcraft=/d; /^photocraft=/d; /^gridcraft=/d; /^filmcraft=/d; /^wordcraft=/d' \
-              /tmp/old-body.txt)"
-          fi
-
-          for commit_file in "${commits[@]}"; do
-            app="$(basename "$commit_file" .commit)"
-            sha="$(tr -d '\r\n' < "$commit_file")"
-
-            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || {
-              echo "Invalid SHA for $app" >&2
-              exit 1
+            [[ -s "$image" ]] || {
+              echo "Missing AppImage for $app: $image" >&2
+              return 1
             }
 
-            body+=$'\n'"${app}=${sha}"
-          done
+            sha="$(tr -d '\r\n' < "$commit_file")"
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "Invalid upstream SHA for $app" >&2
+              return 1
+            }
 
-          release_images=(release/*-latest-x86_64.AppImage)
+            tag="v$(TZ=Asia/Kolkata date +'%Y.%m.%d')"
+            checksum_dir="$(mktemp -d)"
+            cp "$image" "$checksum_dir/"
+            (
+              cd "$checksum_dir"
+              sha256sum ./*.AppImage > SHA256SUMS
+            )
 
-          if [[ ${#release_images[@]} -ne 5 ]]; then
-            echo "Expected five AppImages, found ${#release_images[@]}" >&2
-            exit 1
-          fi
+            cat > "$checksum_dir/release-notes.txt" <<NOTES
+          Unofficial community AppImage build for ${display}.
 
-          (
-            cd release
-            sha256sum ./*-latest-x86_64.AppImage > SHA256SUMS
-          )
+          Version: ${tag}
+          Upstream repository: https://github.com/storytold/${app}
+          Upstream commit: ${sha}
 
-          cat > /tmp/release-notes.txt <<NOTES
-          Unofficial community ArtCraft AppImage builds.
-
-          Version: ${RELEASE_TAG}
-
-          Download the five stable x86_64 AppImages below.
-          Each application is rebuilt independently when its upstream commit changes.
-
-          SHA256 checksums are provided in SHA256SUMS.
-
-          Upstream commit map (machine-readable):
-          ${body}
+          SHA256 checksum: see SHA256SUMS.
 
           These builds are unofficial and are not endorsed by the upstream maintainers.
           NOTES
 
-          if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
-            echo "Updating existing release $RELEASE_TAG"
+            echo "Publishing ${display} to ${target} (${tag})"
 
-            gh release upload "$RELEASE_TAG" \
-              "${release_images[@]}" \
-              release/SHA256SUMS \
-              --repo "$REPOSITORY" \
-              --clobber
+            if gh release view "$tag" --repo "$target" >/dev/null 2>&1; then
+              gh release upload "$tag" \
+                "$checksum_dir"/*.AppImage \
+                "$checksum_dir/SHA256SUMS" \
+                --repo "$target" \
+                --clobber
 
-            gh release edit "$RELEASE_TAG" \
-              --repo "$REPOSITORY" \
-              --title "ArtCraft AppImages ${RELEASE_TAG}" \
-              --notes-file /tmp/release-notes.txt \
-              --latest
-          else
-            echo "Creating release $RELEASE_TAG"
+              gh release edit "$tag" \
+                --repo "$target" \
+                --title "${display} ${tag}" \
+                --notes-file "$checksum_dir/release-notes.txt" \
+                --latest
+            else
+              gh release create "$tag" \
+                "$checksum_dir"/*.AppImage \
+                "$checksum_dir/SHA256SUMS" \
+                --repo "$target" \
+                --title "${display} ${tag}" \
+                --notes-file "$checksum_dir/release-notes.txt" \
+                --latest
+            fi
 
-            gh release create "$RELEASE_TAG" \
-              "${release_images[@]}" \
-              release/SHA256SUMS \
-              --repo "$REPOSITORY" \
-              --title "ArtCraft AppImages ${RELEASE_TAG}" \
-              --notes-file /tmp/release-notes.txt \
-              --latest
+            rm -rf "$checksum_dir"
+            echo "Published ${display} successfully."
+          }
+
+          declare -A targets=(
+            [pdfcraft]="barath-207/pdfcraft-appimage"
+            [photocraft]="barath-207/photocraft-appimage"
+            [gridcraft]="barath-207/gridcraft-appimage"
+            [filmcraft]="barath-207/filmcraft-appimage"
+            [wordcraft]="barath-207/wordcraft-appimage"
+          )
+
+          declare -A displays=(
+            [pdfcraft]="PdfCraft"
+            [photocraft]="PhotoCraft"
+            [gridcraft]="GridCraft"
+            [filmcraft]="FilmCraft"
+            [wordcraft]="WordCraft"
+          )
+
+          declare -A filenames=(
+            [pdfcraft]="PdfCraft-latest-x86_64.AppImage"
+            [photocraft]="PhotoCraft-latest-x86_64.AppImage"
+            [gridcraft]="GridCraft-latest-x86_64.AppImage"
+            [filmcraft]="FilmCraft-latest-x86_64.AppImage"
+            [wordcraft]="WordCraft-latest-x86_64.AppImage"
+          )
+
+          commits=(incoming/*.commit)
+
+          if [[ ${#commits[@]} -eq 0 ]]; then
+            echo "No applications changed. Nothing to publish."
+            exit 0
           fi
 
-          echo "Successfully published ${RELEASE_TAG}."
+          for commit_file in "${commits[@]}"; do
+            app="$(basename "$commit_file" .commit)"
+            image="incoming/${filenames[$app]}"
 
-          echo "Published assets:"
-          printf ' - %s\n' "${release_images[@]}"
-          echo " - SHA256SUMS"
+            publish_app \
+              "$app" \
+              "${displays[$app]}" \
+              "${targets[$app]}" \
+              "$image" \
+              "$commit_file"
+          done

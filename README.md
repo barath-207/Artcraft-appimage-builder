@@ -1,87 +1,142 @@
-# ArtCraft Single-Release AppImage Builder
+# ArtCraft Multi-Repository AppImage Builder
 
-This repository builds the latest upstream `main` commit for five ArtCraft apps and publishes **exactly five stable x86_64 AppImage assets** in one rolling GitHub Release.
+This repository builds the latest upstream `main` commit for five ArtCraft applications and publishes each AppImage to its own GitHub repository and release. The central builder keeps one shared GitHub Actions workflow; each application has independent release history and update tracking.
 
 ## Applications
 
-| App | Upstream repository | Stable release asset |
-|---|---|---|
-| PdfCraft | `storytold/pdfcraft` | `PdfCraft-latest-x86_64.AppImage` |
-| PhotoCraft | `storytold/photocraft` | `PhotoCraft-latest-x86_64.AppImage` |
-| GridCraft | `storytold/gridcraft` | `GridCraft-latest-x86_64.AppImage` |
-| FilmCraft | `storytold/filmcraft` | `FilmCraft-latest-x86_64.AppImage` |
-| WordCraft | `storytold/wordcraft` | `WordCraft-latest-x86_64.AppImage` |
+| App | Upstream repository | AppImage repository | Release asset |
+|---|---|---|---|
+| PdfCraft | `storytold/pdfcraft` | `barath-207/pdfcraft-appimage` | `PdfCraft-latest-x86_64.AppImage` |
+| PhotoCraft | `storytold/photocraft` | `barath-207/photocraft-appimage` | `PhotoCraft-latest-x86_64.AppImage` |
+| GridCraft | `storytold/gridcraft` | `barath-207/gridcraft-appimage` | `GridCraft-latest-x86_64.AppImage` |
+| FilmCraft | `storytold/filmcraft` | `barath-207/filmcraft-appimage` | `FilmCraft-latest-x86_64.AppImage` |
+| WordCraft | `storytold/wordcraft` | `barath-207/wordcraft-appimage` | `WordCraft-latest-x86_64.AppImage` |
 
 ## How it works
 
 - Runs daily at 03:20 UTC (08:50 India time).
-- Resolves the latest upstream `main` commit for each app.
-- Reads the last-built commit map from the rolling release notes.
-- Builds only apps whose upstream commit changed.
+- Resolves the latest upstream `main` commit for each selected app.
+- Compares that commit with the `upstream_commit` recorded in that app repository's latest GitHub release notes.
+- Builds only apps whose upstream commit changed, unless `force=true`.
 - Uses independent matrix jobs with `fail-fast: false`.
-- Uses each upstream repository's own `packaging/linux/package.sh --formats appimage`.
-- Builds on Ubuntu 22.04 for the glibc 2.35 compatibility floor.
+- Uses each upstream repository's `packaging/linux/package.sh --formats appimage`.
+- Builds on Ubuntu 22.04.
 - Uses Cargo caching per application.
-- Smoke-tests the produced AppImage.
-- Updates only changed assets in one release tagged `artcraft-appimages`.
-- Leaves the other four assets untouched.
-- Uses the repository's built-in `GITHUB_TOKEN`; no PAT or cross-repository secret is needed.
+- Uses pinned Craft fonts and PdfCraft translations.
+- Publishes only changed apps to their corresponding AppImage repositories.
+- Uses date-based release tags such as `v2026.11.20`.
+- Uploads one AppImage and `SHA256SUMS` to each app's release.
+- Does not require five separate build workflows.
 
-## One-time setup
+## One-time GitHub setup
 
-1. Keep this repository public.
-2. Back up the current PdfCraft workflow and README.
-3. Replace `.github/workflows/build.yml` with this package's workflow.
-4. Update the README.
-5. Commit and push.
-6. Open Actions → Build ArtCraft AppImages → Run workflow.
-7. Select `all`, leave `force` unchecked, and run.
+### 1. Create the five destination repositories
 
-The publisher job declares `contents: write`; the build jobs have read-only permissions. The repository's default workflow permission can remain read-only because the publish job explicitly elevates its own permission.
+Create these repositories under the `barath-207` account:
+
+- `pdfcraft-appimage`
+- `photocraft-appimage`
+- `gridcraft-appimage`
+- `filmcraft-appimage`
+- `wordcraft-appimage`
+
+For the simplest AppGlider discovery and download experience, make them public.
+
+### 2. Create a fine-grained Personal Access Token
+
+Create a fine-grained GitHub token with access to exactly those five destination repositories.
+
+Grant this repository permission:
+
+- **Contents: Read and write**
+
+No Issues, Pull requests, Actions, Administration, or other permissions are required by this workflow.
+
+The token must be able to read releases and create/edit releases in all five destination repositories.
+
+### 3. Add the token to the builder repository
+
+In `barath-207/pdfcraft-appimage-builder`:
+
+1. Open Settings.
+2. Open Secrets and variables → Actions.
+3. Select New repository secret.
+4. Name it `ARTCRAFT_RELEASE_TOKEN`.
+5. Paste the fine-grained token and save.
+
+The builder repository itself can remain public. Never put the token directly in YAML or README.
+
+### 4. Commit the workflow
+
+Replace `.github/workflows/build.yml` with the supplied workflow and commit it to the default branch.
+
+The builder repository's default workflow permissions can remain read-only. The cross-repository publishing step authenticates using `ARTCRAFT_RELEASE_TOKEN`.
 
 ## Manual runs
 
-- `app=all`: check and build all five.
+Open Actions → Build ArtCraft AppImages → Run workflow.
+
+- `app=all`: check and build all five apps.
 - Select one app: check/build only that app.
-- `force=true`: rebuild selected apps even if the upstream SHA has not changed.
+- `force=false`: build only when the upstream commit differs from that app's latest release.
+- `force=true`: rebuild the selected app or all five apps even when upstream commits are unchanged.
 
-## Release
+A successful build publishes the changed application to its own repository. Unchanged applications are not republished.
 
-The workflow creates or updates one release:
+## Release format
 
-`https://github.com/OWNER/REPO/releases/tag/artcraft-appimages`
+Each destination repository receives its own release:
 
-Stable download URLs:
+`vYYYY.MM.DD`
 
-```text
-https://github.com/OWNER/REPO/releases/latest/download/PdfCraft-latest-x86_64.AppImage
-https://github.com/OWNER/REPO/releases/latest/download/PhotoCraft-latest-x86_64.AppImage
-https://github.com/OWNER/REPO/releases/latest/download/GridCraft-latest-x86_64.AppImage
-https://github.com/OWNER/REPO/releases/latest/download/FilmCraft-latest-x86_64.AppImage
-https://github.com/OWNER/REPO/releases/latest/download/WordCraft-latest-x86_64.AppImage
-```
+For example:
 
-The release notes retain a machine-readable upstream commit map. This avoids adding metadata files as release assets: the five AppImages are the only uploaded binary assets.
+`https://github.com/barath-207/pdfcraft-appimage/releases/latest`
 
-GitHub itself also displays its automatic source-code ZIP and TAR.GZ links; those are not uploaded application assets.
+The PdfCraft release contains:
 
-## Important update behaviour
+- `PdfCraft-latest-x86_64.AppImage`
+- `SHA256SUMS`
 
-This design is for ArtCraft Launcher or another updater that downloads the stable URLs above. It does **not** publish `.zsync` files. AppImageUpdate's embedded zsync feed is separate and may still point to the upstream project. Do not use AppImageUpdate as the update mechanism for these custom builds unless its embedded update information is deliberately changed and separately tested.
+The other four repositories follow the same pattern with their own AppImage filename.
 
-## PdfCraft compatibility
+The release notes contain a machine-readable line:
 
-The original PdfCraft workflow's core build choices are retained:
-- upstream `main` SHA pinning;
-- Ubuntu 22.04;
-- pinned Craft fonts revision `b076417b5880bd4154bd22f00695b1d28c6bea83`;
-- pinned Craft translations revision `575cfdef63227b14daf173b8cc87928bfdfa325e`;
-- stable Rust and Cargo cache;
-- upstream Linux packaging script;
-- AppImage runtime smoke test.
+`upstream_commit=<40-character-commit-sha>`
 
-The workflow does not delete the old PdfCraft release or any old assets. It creates a new rolling release on the first successful run. Review the current upstream packaging changes if their build inputs or environment variable names change.
+The workflow reads this value to decide whether a new build is needed.
 
-## Important validation note
+## AppGlider
 
-The five upstream projects have separate packaging scripts and evolve independently. This workflow uses the same established Linux packaging entry point for each. The first run is the integration test: inspect each app's build log and correct any app-specific dependency or build-input change reported by upstream. A failed matrix job does not cancel successful app builds, but the publish job is gated on the matrix completing successfully to avoid publishing a partial batch accidentally.
+Add each destination repository separately in AppGlider using its repository URL or `owner/repository`:
+
+- `barath-207/pdfcraft-appimage`
+- `barath-207/photocraft-appimage`
+- `barath-207/gridcraft-appimage`
+- `barath-207/filmcraft-appimage`
+- `barath-207/wordcraft-appimage`
+
+Each repository has its own AppImage release stream, allowing AppGlider to manage each app independently. Use stable release tags in the `vYYYY.MM.DD` format.
+
+## Build compatibility
+
+The workflow retains these build choices from the existing builder:
+
+- Upstream `main` SHA pinning.
+- Ubuntu 22.04.
+- Pinned Craft fonts revision `b076417b5880bd4154bd22f00695b1d28c6bea83`.
+- Pinned Craft translations revision `575cfdef63227b14daf173b8cc87928bfdfa325e`.
+- Stable Rust and per-app Cargo cache.
+- Each upstream project's Linux AppImage packaging script.
+- x86_64 AppImage asset naming.
+
+The upstream projects have separate packaging scripts and evolve independently. Treat the first run for each application as an integration test and inspect its build log for app-specific dependency or build-input changes.
+
+## Important behaviour and limitations
+
+- A failed matrix build prevents the publishing job from running, avoiding a partial batch.
+- A manual run for one app only checks and publishes that app.
+- The workflow does not delete old releases.
+- A new release on the same India-local date updates that day's release tag and replaces its AppImage/checksum assets.
+- The workflow does not create `.zsync` files. AppImageUpdate's embedded update feed is separate and must not be assumed to point to these custom releases.
+- AppGlider compatibility should be verified by adding each repository and checking that it detects the versioned AppImage release.
