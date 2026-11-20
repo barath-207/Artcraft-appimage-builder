@@ -14,7 +14,9 @@ This repository builds the latest upstream `main` commit for five ArtCraft appli
 
 ## How it works
 
-- Runs daily at 03:20 UTC (08:50 India time).
+- Checks daily at 03:20 UTC (08:50 India time), but builds PdfCraft, GridCraft, FilmCraft, and WordCraft every 2 days; PhotoCraft is built every 4 days.
+- The cadence is anchored to 2026-11-20 (Asia/Kolkata): the first scheduled build day is November 20, then November 22, 24, and so on. PhotoCraft runs on November 20, 24, 28, and so on.
+- Manual workflow dispatches are not restricted by the scheduled cadence.
 - Resolves the latest upstream `main` commit for each selected app.
 - Compares that commit with the `upstream_commit` recorded in that app repository's latest GitHub release notes.
 - Builds only apps whose upstream commit changed, unless `force=true`.
